@@ -29,66 +29,83 @@ import sys
 import zipfile
 import tempfile
 import shutil
-from pathlib import Path
+try:
+    import py7zr
+except ImportError:
+    py7zr = None
 
+from pathlib import Path
 from PySide6 import QtCore
 from PySide6.QtWidgets import (
     QWidget, QPushButton, QVBoxLayout, QFileDialog,
     QTextEdit, QLabel, QMessageBox, QProgressBar
 )
 from freecad import project_utility
+from freecad.utils import get_python_exe
+import addonmanager_utilities as utils
+import FreeCAD
 
-# Vérification ou installation de py7zr
-# def verifier_ou_installer_py7zr():
-    # try:
-        # import py7zr
-    # except ImportError:
-        # fc_dir = FreeCAD.getHomePath()
-        # python_exe = os.path.join(fc_dir, "bin", "python")
-        # packages_dir = os.path.join(fc_dir, "lib")
-        # subprocess.check_call([python_exe, "-m", "pip", "install", "py7zr", f"--target={packages_dir}"])
-        # import py7zr
-    # return py7zr
 
 def verifier_ou_installer_py7zr():
     try:
         import py7zr
+        # FreeCAD.Console.PrintError("✅ Py7zr est déjà installé.\n")
         return py7zr
     except ImportError:
-        pass  # On continue pour essayer de l'installer
+        FreeCAD.Console.PrintError("❌ Dépendance Py7zr manquante.\n")
+        pass  # On continue pour demander à l'utilisateur
 
-    import FreeCAD
+    reponse = QMessageBox.question(
+        None,
+        "Installation requise",
+        "Le module 'py7zr' est nécessaire pour compresser/décompresser les fichiers.\nSouhaitez-vous continuer l'installation ?",
+        QMessageBox.Yes | QMessageBox.No
+    )
+
+    if reponse != QMessageBox.Yes:
+        FreeCAD.Console.PrintError("❌ Installation annulée par l’utilisateur.\n")
+        return None
 
     fc_dir = FreeCAD.getHomePath()
+    pkg_name = "py7zr"
 
-    # Détermine les chemins
     if sys.platform.startswith("win"):
         python_exe = os.path.join(fc_dir, "bin", "python.exe")
         packages_dir = os.path.join(fc_dir, "lib")
+
+        try:
+            subprocess.check_call([python_exe, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            FreeCAD.Console.PrintError("❌ pip n'est pas disponible. Impossible d'installer py7zr automatiquement.\n")
+            return None
+
+        try:
+            subprocess.check_call([python_exe, "-m", "pip", "install","--disable-pip-version-check", "--target", packages_dir, pkg_name])
+            # subprocess.check_call([python_exe, "-m", "pip", "uninstall", pkg_name])
+
+            FreeCAD.Console.PrintError("✅ L’installation de py7zr a réussi.\n")
+        except subprocess.CalledProcessError:
+            FreeCAD.Console.PrintError("❌ L’installation de py7zr a échoué.\n")
+            return None
+
     else:  # Linux ou macOS
-        python_exe = sys.executable
-        packages_dir = os.path.join(fc_dir, "Ext")
-        os.makedirs(packages_dir, exist_ok=True)
+        python_exe = get_python_exe()
+        vendor_path = utils.get_pip_target_directory()
+        packages_dir = vendor_path
 
-    # Vérifie que pip est disponible
-    try:
-        subprocess.check_call([python_exe, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        print("Erreur : pip n'est pas disponible dans l'environnement Python de FreeCAD.")
-        FreeCAD.Console.PrintError("❌ pip n'est pas disponible. Impossible d'installer py7zr automatiquement.\n")
-        return None
+        if not os.path.exists(vendor_path):
+            os.makedirs(vendor_path)
 
-    # Tente d'installer py7zr
-    try:
-        subprocess.check_call([
-            python_exe, "-m", "pip", "install", "py7zr", f"--target={packages_dir}"
-        ])
-    except subprocess.CalledProcessError as e:
-        print(f"Erreur pendant l'installation de py7zr : {e}")
-        FreeCAD.Console.PrintError("❌ Échec de l'installation de py7zr via pip.\n")
-        return None
+        try:
+            subprocess.check_call([
+                python_exe, "-m", "pip", "install", "--disable-pip-version-check",
+                "--target", vendor_path, pkg_name
+            ])
+            FreeCAD.Console.PrintError("✅ L’installation de py7zr a réussi.\n")
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"❌ L’installation de py7zr a échoué : {e}\n")
+            return None
 
-    # Ajoute le chemin au sys.path et importe à nouveau
     if packages_dir not in sys.path:
         sys.path.insert(0, packages_dir)
 
@@ -98,9 +115,6 @@ def verifier_ou_installer_py7zr():
     except ImportError:
         FreeCAD.Console.PrintError("❌ py7zr reste introuvable après installation.\n")
         return None
-
-
-py7zr = verifier_ou_installer_py7zr()
 
 class WorkerSignals(QtCore.QObject):
     progress = QtCore.Signal(int)
@@ -117,6 +131,12 @@ class CompressorWorker(QtCore.QRunnable):
 
     @QtCore.Slot()
     def run(self):
+        if not py7zr:
+            self.signals.log.emit("❌ Le module py7zr est introuvable.")
+            self.signals.success.emit(False)
+            self.signals.finished.emit()
+            return
+            
         temp_dir = tempfile.mkdtemp()
         try:
             # Décompression du fichier FCStd
@@ -139,7 +159,7 @@ class CompressorWorker(QtCore.QRunnable):
                     rel_path = os.path.relpath(full_path, temp_dir)
                     archive.write(full_path, arcname=rel_path)
                     self.signals.progress.emit(int(i / total * 100))
-                    QtCore.QThread.msleep(0.1)
+                    # QtCore.QThread.msleep(0.1)
 
             taille_7z = os.path.getsize(self.fichier_destination) / (1024 * 1024)
             
@@ -168,6 +188,11 @@ class DesarchiverWorker(QtCore.QRunnable):
 
     @QtCore.Slot()
     def run(self):
+        if not py7zr:
+            self.signals.log.emit("❌ Le module py7zr est introuvable.")
+            self.signals.success.emit(False)
+            self.signals.finished.emit()
+            return
         temp_dir = tempfile.mkdtemp()
         try:
             self.signals.log.emit(f"⏳ Décompression de {self.archive_7z}...")
@@ -212,6 +237,8 @@ class FCStdCompressor(QWidget):
         self.setWindowTitle("Archivage de fichier FreeCAD")
         self.setMinimumWidth(400)
         self.setWindowModality(QtCore.Qt.ApplicationModal)
+        self.move(QtCore.QCoreApplication.instance().activeWindow().geometry().center() - self.rect().center())
+
 
         self.label = QLabel("Gestion d'archivage de fichier FreeCAD (.FCStd)")
         self.btn_compresser_fcstd = QPushButton("🗃️ Archiver un fichier .FCStd")
@@ -295,7 +322,7 @@ class FCStdCompressor(QWidget):
         worker.signals.finished.connect(lambda: self.set_buttons_enabled(True))
         worker.signals.finished.connect(lambda: self.progress_bar.setValue(100))
         worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setEnabled(True))
-        worker.signals.success.connect(lambda: self.btn_ouvrir_fichier.setText(f"📂 Ouvrir {os.path.basename(fichier_sortie_fcstd)} dans FreeCAD"))
+        worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setText(f"📂 Ouvrir {os.path.basename(fichier_sortie_fcstd)} dans FreeCAD") if ok else None)
 
         self.threadpool.start(worker)
 
@@ -316,9 +343,15 @@ class FCStdCompressor(QWidget):
             self.log_append(f"❌ Erreur lors de l'ouverture : {e}")
 
 # Affichage dans FreeCAD
-try:
-    myWin.close()
-except:
-    pass
-myWin = FCStdCompressor()
-myWin.show()
+if 'myWin' in globals():
+    try:
+        myWin.close()
+    except:
+        pass
+    
+py7zr = verifier_ou_installer_py7zr()
+if py7zr :
+    myWin = FCStdCompressor()
+    myWin.show()
+else:
+    FreeCAD.Console.PrintError("❌ py7zr : dépendance manquante. Abandon.\n")
