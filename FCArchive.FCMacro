@@ -1,7 +1,15 @@
 # FCArchive for FreeCAD
 #
-# Copyright (C) 2025 Grubuntu
+# Macro for archiving FCStd files in 7z format to save disk space.
+# The basic FreeCAD file format is ZIP compression, which is not 
+# optimal in terms of compression ratio. Using the 7z compression
+# format saves up to 75% space without any loss of data.
 #
+# This macro is for demonstration purposes only and is not 
+# guaranteed to work.This macro uses the py7zr library 
+# https://github.com/miurahr/py7zr LGPL-2.1 license
+#
+# Copyright (C) 2025 Grubuntu
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -16,12 +24,8 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
-
-# Attribution:
-# http://forum.freecadweb.org/
-# http://www.freecadweb.org/wiki/index.php?title=Code_snippets
 #
-# Version : 1.0
+# FCArchive V1.0
 
 import os
 import subprocess
@@ -29,6 +33,7 @@ import sys
 import zipfile
 import tempfile
 import shutil
+
 try:
     import py7zr
 except ImportError:
@@ -45,47 +50,51 @@ from freecad.utils import get_python_exe
 import addonmanager_utilities as utils
 import FreeCAD
 
-
-def verifier_ou_installer_py7zr():
+# check if library py7zr is present
+def check_py7zr():
     try:
         import py7zr
-        # FreeCAD.Console.PrintError("✅ Py7zr est déjà installé.\n")
+        # FreeCAD.Console.PrintError("✅ Py7zr is already installed.\n")
         return py7zr
     except ImportError:
-        FreeCAD.Console.PrintError("❌ Dépendance Py7zr manquante.\n")
+        FreeCAD.Console.PrintError("❌ Missing Py7zr dependency.\n")
         pass  # On continue pour demander à l'utilisateur
 
+    # ask user for installation
     reponse = QMessageBox.question(
         None,
-        "Installation requise",
-        "Le module 'py7zr' est nécessaire pour compresser/décompresser les fichiers.\nSouhaitez-vous continuer l'installation ?",
+        "Installation required."
+        "The 'py7zr' module is necessary to compress/decompress files. Would you like to continue the installation?",
         QMessageBox.Yes | QMessageBox.No
     )
 
     if reponse != QMessageBox.Yes:
-        FreeCAD.Console.PrintError("❌ Installation annulée par l’utilisateur.\n")
+        FreeCAD.Console.PrintError("❌ Installation canceled by the user.\n")
         return None
 
     fc_dir = FreeCAD.getHomePath()
     pkg_name = "py7zr"
 
+    # check platform (Windows or Linux/MacOs)
     if sys.platform.startswith("win"):
         python_exe = os.path.join(fc_dir, "bin", "python.exe")
         packages_dir = os.path.join(fc_dir, "lib")
 
+        # check if pip is present
         try:
             subprocess.check_call([python_exe, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            FreeCAD.Console.PrintError("❌ pip n'est pas disponible. Impossible d'installer py7zr automatiquement.\n")
+            FreeCAD.Console.PrintError("❌ pip is not available. Unable to install py7zr automatically.\n Please install pip manually.")
             return None
 
+        # try to install py7zr
         try:
             subprocess.check_call([python_exe, "-m", "pip", "install","--disable-pip-version-check", "--target", packages_dir, pkg_name])
             # subprocess.check_call([python_exe, "-m", "pip", "uninstall", pkg_name])
 
-            FreeCAD.Console.PrintError("✅ L’installation de py7zr a réussi.\n")
+            FreeCAD.Console.PrintError("✅ The installation of py7zr was successful.\n")
         except subprocess.CalledProcessError:
-            FreeCAD.Console.PrintError("❌ L’installation de py7zr a échoué.\n")
+            FreeCAD.Console.PrintError("❌ The installation of py7zr has failed.\n")
             return None
 
     else:  # Linux ou macOS
@@ -96,31 +105,35 @@ def verifier_ou_installer_py7zr():
         if not os.path.exists(vendor_path):
             os.makedirs(vendor_path)
 
+        # try to install py7zr
         try:
             subprocess.check_call([
                 python_exe, "-m", "pip", "install", "--disable-pip-version-check",
                 "--target", vendor_path, pkg_name
             ])
-            FreeCAD.Console.PrintError("✅ L’installation de py7zr a réussi.\n")
+            FreeCAD.Console.PrintError("✅ The installation of py7zr was successful.\n")
         except Exception as e:
-            FreeCAD.Console.PrintError(f"❌ L’installation de py7zr a échoué : {e}\n")
+            FreeCAD.Console.PrintError(f"❌ The installation of py7zr has failed:{e}\n")
             return None
 
     if packages_dir not in sys.path:
         sys.path.insert(0, packages_dir)
 
+    # test py7zr installation
     try:
         import py7zr
         return py7zr
     except ImportError:
-        FreeCAD.Console.PrintError("❌ py7zr reste introuvable après installation.\n")
+        FreeCAD.Console.PrintError("❌ Py7zr is still missing after installation.\n")
         return None
+
 
 class WorkerSignals(QtCore.QObject):
     progress = QtCore.Signal(int)
     log = QtCore.Signal(str)
     finished = QtCore.Signal()
     success = QtCore.Signal(bool)
+
 
 class CompressorWorker(QtCore.QRunnable):
     def __init__(self, fcstd_path, fichier_destination):
@@ -132,7 +145,7 @@ class CompressorWorker(QtCore.QRunnable):
     @QtCore.Slot()
     def run(self):
         if not py7zr:
-            self.signals.log.emit("❌ Le module py7zr est introuvable.")
+            self.signals.log.emit("❌ The Py7zr module is not found.")
             self.signals.success.emit(False)
             self.signals.finished.emit()
             return
@@ -144,8 +157,8 @@ class CompressorWorker(QtCore.QRunnable):
                 zip_ref.extractall(temp_dir)
                 
             taille_originale = os.path.getsize(self.fcstd_path) / (1024 * 1024)
-            self.signals.log.emit(f"📋 Taille du fichier original : {taille_originale:.2f} Mo")
-            self.signals.log.emit("✅ Compression...")
+            self.signals.log.emit(f"📋 Original file size.:{taille_originale:.2f} Mo")
+            self.signals.log.emit("✅ Compressing...")
 
             # Compression en 7z
             with py7zr.SevenZipFile(self.fichier_destination, mode='w') as archive:
@@ -164,18 +177,19 @@ class CompressorWorker(QtCore.QRunnable):
             taille_7z = os.path.getsize(self.fichier_destination) / (1024 * 1024)
             
             taux = 100 * (1 - taille_7z / taille_originale)
-            self.signals.log.emit("✅ Compression réussie !")
-            self.signals.log.emit(f"📦 Taille de l'archive : {taille_7z:.2f} Mo")
-            self.signals.log.emit(f"📉 Taux de compression : {taux:.1f} %")
+            self.signals.log.emit("✅ Compression successful!")
+            self.signals.log.emit(f"📦 Archive size: {taille_7z:.2f} Mo")
+            self.signals.log.emit(f"📉 Compression rate: {taux:.1f} %")
 
             self.signals.success.emit(True)
 
         except Exception as e:
-            self.signals.log.emit(f"❌ Erreur : {e}")
+            self.signals.log.emit(f"❌ Error : {e}")
             self.signals.success.emit(False)
         finally:
             shutil.rmtree(temp_dir)
             self.signals.finished.emit()
+
 
 class DesarchiverWorker(QtCore.QRunnable):
     def __init__(self, archive_7z, fichier_sortie_fcstd, progress_bar, btn_ouvrir_fichier):
@@ -189,18 +203,20 @@ class DesarchiverWorker(QtCore.QRunnable):
     @QtCore.Slot()
     def run(self):
         if not py7zr:
-            self.signals.log.emit("❌ Le module py7zr est introuvable.")
+            self.signals.log.emit("❌ The Py7zr module is not found.")
             self.signals.success.emit(False)
             self.signals.finished.emit()
             return
         temp_dir = tempfile.mkdtemp()
+
+        # uncompress
         try:
-            self.signals.log.emit(f"⏳ Décompression de {self.archive_7z}...")
+            self.signals.log.emit(f"⏳ Decompression of {self.archive_7z}...")
             with py7zr.SevenZipFile(self.archive_7z, mode='r') as archive:
                 archive.extractall(path=temp_dir)
                 self.progress_bar.setValue(70)
         except Exception as e:
-            self.signals.log.emit(f"❌ Erreur lors de la décompression : {e}")
+            self.signals.log.emit(f"❌ Error during decompression:{e}")
             self.signals.success.emit(False)
             shutil.rmtree(temp_dir)
             self.signals.finished.emit()
@@ -208,7 +224,7 @@ class DesarchiverWorker(QtCore.QRunnable):
 
         document_xml = os.path.join(temp_dir, "Document.xml")
         if not os.path.exists(document_xml):
-            self.signals.log.emit("❌ Document.xml introuvable. Archive invalide ?")
+            self.signals.log.emit("❌ Document.xml not found. Invalid archive?")
             self.signals.success.emit(False)
             shutil.rmtree(temp_dir)
             self.signals.finished.emit()
@@ -217,35 +233,35 @@ class DesarchiverWorker(QtCore.QRunnable):
         try:
             project_utility.createDocument(document_xml, self.fichier_sortie_fcstd)
             taille_fcstd = os.path.getsize(self.fichier_sortie_fcstd) / (1024 * 1024)
-            self.signals.log.emit(f"✅ Document reconstruit : {self.fichier_sortie_fcstd} ({taille_fcstd:.2f} Mo)")
+            self.signals.log.emit(f"✅ Document rebuilt successfully:{self.fichier_sortie_fcstd} ({taille_fcstd:.2f} Mo)")
             self.progress_bar.setValue(100)
             self.signals.success.emit(True)
 
         except Exception as e:
-            self.signals.log.emit(f"❌ Erreur lors de la création du document : {e}")
+            self.signals.log.emit(f"❌ Error while creating the document:{e}")
             self.signals.success.emit(False)
         finally:
             try:
                 shutil.rmtree(temp_dir)
             except Exception as e:
-                self.signals.log.emit(f"⚠️ Impossible de supprimer le dossier temporaire : {e}")
+                self.signals.log.emit(f"⚠️ Unable to delete the temporary folder:{e}")
             self.signals.finished.emit()
+
 
 class FCStdCompressor(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Archivage de fichier FreeCAD")
+        self.setWindowTitle("Archiving FreeCAD file")
         self.setMinimumWidth(400)
         self.setWindowModality(QtCore.Qt.ApplicationModal)
         self.move(QtCore.QCoreApplication.instance().activeWindow().geometry().center() - self.rect().center())
 
-
-        self.label = QLabel("Gestion d'archivage de fichier FreeCAD (.FCStd)")
-        self.btn_compresser_fcstd = QPushButton("🗃️ Archiver un fichier .FCStd")
-        self.btn_extraire = QPushButton("🗂 Extraire une archive .FCArchive")
-        self.btn_ouvrir_fichier = QPushButton("📂 Ouvrir le fichier .FCStd extrait")
+        self.label = QLabel("FreeCAD file archiving management (.FCStd)")
+        self.btn_compresser_fcstd = QPushButton("🗃️ Archiving a file .FCStd")
+        self.btn_extraire = QPushButton("🗂 Extracting an archive .FCArchive")
+        self.btn_ouvrir_fichier = QPushButton("📂 Opening the extracted file .FCStd")
         self.btn_ouvrir_fichier.setEnabled(False)
-        self.btn_quitter = QPushButton("❌ Quitter")
+        self.btn_quitter = QPushButton("❌ Quit")
         self.progress_bar = QProgressBar()
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -274,19 +290,19 @@ class FCStdCompressor(QWidget):
         self.btn_extraire.setEnabled(enabled)
 
     def action_compresser_fcstd(self):
-        fcstd_path, _ = QFileDialog.getOpenFileName(self, "Choisir un fichier .FCStd", "", "Fichier FCStd (*.FCStd)")
+        fcstd_path, _ = QFileDialog.getOpenFileName(self, "Choose a file .FCStd", "", "FCStd File (*.FCStd)")
         if not fcstd_path or not os.path.isfile(fcstd_path):
-            QMessageBox.warning(self, "Erreur", "Fichier .FCStd invalide.")
+            QMessageBox.warning(self, "Error", "FCStd File invalid.")
             return
 
         fichier_destination, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer sous", fcstd_path.replace(".FCStd", ".FCArchive"), "Archive FreeCAD (*.FCArchive)"
+            self, "Save as...", fcstd_path.replace(".FCStd", ".FCArchive"), "Archive FreeCAD (*.FCArchive)"
         )
         if not fichier_destination:
             return
             
         if fcstd_path in [doc.FileName for doc in FreeCAD.listDocuments().values()]:
-            QMessageBox.warning(self, "Erreur", "Ce fichier est actuellement ouvert dans FreeCAD. Fermez-le d'abord.")
+            QMessageBox.warning(self, "Error", "This file is currently open in FreeCAD. Close it first.")
             return
 
         self.set_buttons_enabled(False)
@@ -302,12 +318,12 @@ class FCStdCompressor(QWidget):
 
     def action_desarchiver(self):
         # self.btn_ouvrir_fichier.setEnabled(False)
-        archive_7z, _ = QFileDialog.getOpenFileName(self, "Choisir une archive", "", "Archive FreeCAD (*.FCArchive)")
+        archive_7z, _ = QFileDialog.getOpenFileName(self, "Choose an archive", "", "FreeCAD Archive (*.FCArchive)")
         if not archive_7z:
             return
 
         fichier_sortie_fcstd, _ = QFileDialog.getSaveFileName(
-            self, "Enregistrer sous", archive_7z.replace(".FCArchive", ".FCStd"), "Fichier FCStd (*.FCStd)"
+            self, "Save as...", archive_7z.replace(".FCArchive", ".FCStd"), "FCStd File (*.FCStd)"
         )
         if not fichier_sortie_fcstd:
             return
@@ -318,29 +334,20 @@ class FCStdCompressor(QWidget):
         worker = DesarchiverWorker(archive_7z, fichier_sortie_fcstd, self.progress_bar, self.btn_ouvrir_fichier)
         worker.signals.log.connect(self.log_append)
         worker.signals.progress.connect(self.progress_bar.setValue)
-        # worker.signals.success.connect(lambda ok: self.ouvrir_fcstd_apres(ok, fichier_sortie_fcstd))
         worker.signals.finished.connect(lambda: self.set_buttons_enabled(True))
         worker.signals.finished.connect(lambda: self.progress_bar.setValue(100))
         worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setEnabled(True))
-        worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setText(f"📂 Ouvrir {os.path.basename(fichier_sortie_fcstd)} dans FreeCAD") if ok else None)
+        worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setText(f"📂 Open {os.path.basename(fichier_sortie_fcstd)} in FreeCAD") if ok else None)
 
         self.threadpool.start(worker)
 
-    def ouvrir_fcstd_apres(self, ok, fichier):
-        if ok:
-            try:
-                self.log_append("✅ Ouverture du fichier...")
-                FreeCAD.openDocument(fichier)
-            except Exception as e:
-                self.log_append(f"❌ Erreur lors de l'ouverture : {e}")
-                
     def ouvrir_fcstd(self):
         fichier = self.fichier_sortie_fcstd
         try:
-            self.log_append("✅ Ouverture du fichier...")
+            self.log_append("✅ Opening the file...")
             FreeCAD.openDocument(fichier)
         except Exception as e:
-            self.log_append(f"❌ Erreur lors de l'ouverture : {e}")
+            self.log_append(f"❌ Error while opening the file:{e}")
 
 # Affichage dans FreeCAD
 if 'myWin' in globals():
@@ -349,9 +356,9 @@ if 'myWin' in globals():
     except:
         pass
     
-py7zr = verifier_ou_installer_py7zr()
+py7zr = check_py7zr()
 if py7zr :
     myWin = FCStdCompressor()
     myWin.show()
 else:
-    FreeCAD.Console.PrintError("❌ py7zr : dépendance manquante. Abandon.\n")
+    FreeCAD.Console.PrintError("❌ Py7zr: Missing dependency. Operation aborted.\n")
