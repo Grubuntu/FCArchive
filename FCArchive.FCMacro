@@ -25,6 +25,7 @@
 
 import os
 import subprocess
+import sys
 import zipfile
 import tempfile
 import shutil
@@ -38,36 +39,67 @@ from PySide6.QtWidgets import (
 from freecad import project_utility
 
 # Vérification ou installation de py7zr
+# def verifier_ou_installer_py7zr():
+    # try:
+        # import py7zr
+    # except ImportError:
+        # fc_dir = FreeCAD.getHomePath()
+        # python_exe = os.path.join(fc_dir, "bin", "python")
+        # packages_dir = os.path.join(fc_dir, "lib")
+        # subprocess.check_call([python_exe, "-m", "pip", "install", "py7zr", f"--target={packages_dir}"])
+        # import py7zr
+    # return py7zr
+    
 def verifier_ou_installer_py7zr():
     try:
         import py7zr
+        return py7zr
     except ImportError:
-        import FreeCAD
-        fc_dir = FreeCAD.getHomePath()
+        pass  # On continue pour essayer de l'installer
 
-        # Détection de l'exécutable Python de FreeCAD
-        if sys.platform.startswith("win"):
-            python_exe = os.path.join(fc_dir, "bin", "python.exe")
-            packages_dir = os.path.join(fc_dir, "lib")
-        else:  # Linux et macOS
-            python_exe = sys.executable  # Utilise l'interpréteur Python actuel (celui de FreeCAD)
-            packages_dir = os.path.join(fc_dir, "Ext")  # Dossier d'extension (modifiable selon ta config)
+    import FreeCAD
 
-            # Crée le dossier si nécessaire
-            os.makedirs(packages_dir, exist_ok=True)
+    fc_dir = FreeCAD.getHomePath()
 
-        # Installation de py7zr
+    # Détermine les chemins
+    if sys.platform.startswith("win"):
+        python_exe = os.path.join(fc_dir, "bin", "python.exe")
+        packages_dir = os.path.join(fc_dir, "lib")
+    else:  # Linux ou macOS
+        python_exe = sys.executable
+        packages_dir = os.path.join(fc_dir, "Ext")
+        os.makedirs(packages_dir, exist_ok=True)
+
+    # Vérifie que pip est disponible
+    try:
+        subprocess.check_call([python_exe, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print("Erreur : pip n'est pas disponible dans l'environnement Python de FreeCAD.")
+        FreeCAD.Console.PrintError("❌ pip n'est pas disponible. Impossible d'installer py7zr automatiquement.\n")
+        return None
+
+    # Tente d'installer py7zr
+    try:
         subprocess.check_call([
             python_exe, "-m", "pip", "install", "py7zr", f"--target={packages_dir}"
         ])
+    except subprocess.CalledProcessError as e:
+        print(f"Erreur pendant l'installation de py7zr : {e}")
+        FreeCAD.Console.PrintError("❌ Échec de l'installation de py7zr via pip.\n")
+        return None
 
-        # Ajout du dossier dans sys.path pour importer le module
-        if packages_dir not in sys.path:
-            sys.path.insert(0, packages_dir)
+    # Ajoute le chemin au sys.path et importe à nouveau
+    if packages_dir not in sys.path:
+        sys.path.insert(0, packages_dir)
 
+    try:
         import py7zr
+        return py7zr
+    except ImportError:
+        FreeCAD.Console.PrintError("❌ py7zr reste introuvable après installation.\n")
+        return None
+    
 
-    return py7zr
 py7zr = verifier_ou_installer_py7zr()
 
 class WorkerSignals(QtCore.QObject):
