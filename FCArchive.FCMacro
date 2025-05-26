@@ -1,0 +1,273 @@
+# FCArchive for FreeCAD
+#
+# Copyright (C) 2025 Grubuntu
+#
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
+
+# Attribution:
+# http://forum.freecadweb.org/
+# http://www.freecadweb.org/wiki/index.php?title=Code_snippets
+#
+# Version : 1.0
+
+import os
+import subprocess
+import zipfile
+import tempfile
+import shutil
+from pathlib import Path
+
+from PySide6 import QtCore
+from PySide6.QtWidgets import (
+    QWidget, QPushButton, QVBoxLayout, QFileDialog,
+    QTextEdit, QLabel, QMessageBox, QProgressBar
+)
+from freecad import project_utility
+
+# Vérification ou installation de py7zr
+def verifier_ou_installer_py7zr():
+    try:
+        import py7zr
+    except ImportError:
+        fc_dir = FreeCAD.getHomePath()
+        python_exe = os.path.join(fc_dir, "bin", "python")
+        packages_dir = os.path.join(fc_dir, "lib")
+        subprocess.check_call([python_exe, "-m", "pip", "install", "py7zr", f"--target={packages_dir}"])
+        import py7zr
+    return py7zr
+
+py7zr = verifier_ou_installer_py7zr()
+
+class WorkerSignals(QtCore.QObject):
+    progress = QtCore.Signal(int)
+    log = QtCore.Signal(str)
+    finished = QtCore.Signal()
+    success = QtCore.Signal(bool)
+
+class CompressorWorker(QtCore.QRunnable):
+    def __init__(self, fcstd_path, fichier_destination):
+        super().__init__()
+        self.fcstd_path = fcstd_path
+        self.fichier_destination = fichier_destination
+        self.signals = WorkerSignals()
+
+    @QtCore.Slot()
+    def run(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Décompression du fichier FCStd
+            with zipfile.ZipFile(self.fcstd_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+                
+            taille_originale = os.path.getsize(self.fcstd_path) / (1024 * 1024)
+            self.signals.log.emit(f"📋 Taille du fichier original : {taille_originale:.2f} Mo")
+            self.signals.log.emit("✅ Compression...")
+
+            # Compression en 7z
+            with py7zr.SevenZipFile(self.fichier_destination, mode='w') as archive:
+                files = [
+                    os.path.join(root, f)
+                    for root, _, fs in os.walk(temp_dir)
+                    for f in fs
+                ]
+                total = len(files)
+                for i, full_path in enumerate(files, 1):
+                    rel_path = os.path.relpath(full_path, temp_dir)
+                    archive.write(full_path, arcname=rel_path)
+                    self.signals.progress.emit(int(i / total * 100))
+                    QtCore.QThread.msleep(0.1)
+
+            taille_7z = os.path.getsize(self.fichier_destination) / (1024 * 1024)
+            
+            taux = 100 * (1 - taille_7z / taille_originale)
+            self.signals.log.emit("✅ Compression réussie !")
+            self.signals.log.emit(f"📦 Taille de l'archive : {taille_7z:.2f} Mo")
+            self.signals.log.emit(f"📉 Taux de compression : {taux:.1f} %")
+
+            self.signals.success.emit(True)
+
+        except Exception as e:
+            self.signals.log.emit(f"❌ Erreur : {e}")
+            self.signals.success.emit(False)
+        finally:
+            shutil.rmtree(temp_dir)
+            self.signals.finished.emit()
+
+class DesarchiverWorker(QtCore.QRunnable):
+    def __init__(self, archive_7z, fichier_sortie_fcstd, progress_bar, btn_ouvrir_fichier):
+        super().__init__()
+        self.archive_7z = archive_7z
+        self.fichier_sortie_fcstd = fichier_sortie_fcstd
+        self.signals = WorkerSignals()
+        self.progress_bar = progress_bar
+        self.btn_ouvrir_fichier = btn_ouvrir_fichier
+
+    @QtCore.Slot()
+    def run(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            self.signals.log.emit(f"⏳ Décompression de {self.archive_7z}...")
+            with py7zr.SevenZipFile(self.archive_7z, mode='r') as archive:
+                archive.extractall(path=temp_dir)
+                self.progress_bar.setValue(70)
+        except Exception as e:
+            self.signals.log.emit(f"❌ Erreur lors de la décompression : {e}")
+            self.signals.success.emit(False)
+            shutil.rmtree(temp_dir)
+            self.signals.finished.emit()
+            return
+
+        document_xml = os.path.join(temp_dir, "Document.xml")
+        if not os.path.exists(document_xml):
+            self.signals.log.emit("❌ Document.xml introuvable. Archive invalide ?")
+            self.signals.success.emit(False)
+            shutil.rmtree(temp_dir)
+            self.signals.finished.emit()
+            return
+
+        try:
+            project_utility.createDocument(document_xml, self.fichier_sortie_fcstd)
+            taille_fcstd = os.path.getsize(self.fichier_sortie_fcstd) / (1024 * 1024)
+            self.signals.log.emit(f"✅ Document reconstruit : {self.fichier_sortie_fcstd} ({taille_fcstd:.2f} Mo)")
+            self.progress_bar.setValue(100)
+            self.signals.success.emit(True)
+
+        except Exception as e:
+            self.signals.log.emit(f"❌ Erreur lors de la création du document : {e}")
+            self.signals.success.emit(False)
+        finally:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                self.signals.log.emit(f"⚠️ Impossible de supprimer le dossier temporaire : {e}")
+            self.signals.finished.emit()
+
+class FCStdCompressor(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Archivage de fichier FreeCAD")
+        self.setMinimumWidth(400)
+        self.setWindowModality(QtCore.Qt.ApplicationModal)
+
+        self.label = QLabel("Gestion d'archivage de fichier FreeCAD (.FCStd)")
+        self.btn_compresser_fcstd = QPushButton("🗃️ Archiver un fichier .FCStd")
+        self.btn_extraire = QPushButton("🗂 Extraire une archive .FCArchive")
+        self.btn_ouvrir_fichier = QPushButton("📂 Ouvrir le fichier .FCStd extrait")
+        self.btn_ouvrir_fichier.setEnabled(False)
+        self.btn_quitter = QPushButton("❌ Quitter")
+        self.progress_bar = QProgressBar()
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        for widget in [self.label, self.btn_compresser_fcstd, self.btn_extraire, self.btn_ouvrir_fichier, self.progress_bar, self.log, self.btn_quitter]:
+            layout.addWidget(widget)
+
+        self.btn_compresser_fcstd.clicked.connect(self.action_compresser_fcstd)
+        self.btn_extraire.clicked.connect(self.action_desarchiver)
+        self.btn_ouvrir_fichier.clicked.connect(self.ouvrir_fcstd)
+        self.btn_quitter.clicked.connect(self.close)
+
+        self.threadpool = QtCore.QThreadPool()
+
+
+    def log_append(self, text):
+        self.log.append(text)
+        self.log.ensureCursorVisible()
+
+    def set_buttons_enabled(self, enabled):
+        self.btn_compresser_fcstd.setEnabled(enabled)
+        self.btn_extraire.setEnabled(enabled)
+
+    def action_compresser_fcstd(self):
+        fcstd_path, _ = QFileDialog.getOpenFileName(self, "Choisir un fichier .FCStd", "", "Fichier FCStd (*.FCStd)")
+        if not fcstd_path or not os.path.isfile(fcstd_path):
+            QMessageBox.warning(self, "Erreur", "Fichier .FCStd invalide.")
+            return
+
+        fichier_destination, _ = QFileDialog.getSaveFileName(
+            self, "Enregistrer sous", fcstd_path.replace(".FCStd", ".FCArchive"), "Archive FreeCAD (*.FCArchive)"
+        )
+        if not fichier_destination:
+            return
+            
+        if fcstd_path in [doc.FileName for doc in FreeCAD.listDocuments().values()]:
+            QMessageBox.warning(self, "Erreur", "Ce fichier est actuellement ouvert dans FreeCAD. Fermez-le d'abord.")
+            return
+
+        self.set_buttons_enabled(False)
+        self.progress_bar.setValue(0)
+
+        workerComp = CompressorWorker(fcstd_path, fichier_destination)
+        workerComp.signals.progress.connect(self.progress_bar.setValue)
+        workerComp.signals.log.connect(self.log_append)
+        workerComp.signals.finished.connect(lambda: self.set_buttons_enabled(True))
+        workerComp.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setEnabled(False))
+
+        self.threadpool.start(workerComp)
+
+    def action_desarchiver(self):
+        # self.btn_ouvrir_fichier.setEnabled(False)
+        archive_7z, _ = QFileDialog.getOpenFileName(self, "Choisir une archive", "", "Archive FreeCAD (*.FCArchive)")
+        if not archive_7z:
+            return
+
+        fichier_sortie_fcstd, _ = QFileDialog.getSaveFileName(
+            self, "Enregistrer sous", archive_7z.replace(".FCArchive", ".FCStd"), "Fichier FCStd (*.FCStd)"
+        )
+        if not fichier_sortie_fcstd:
+            return
+
+        self.fichier_sortie_fcstd = fichier_sortie_fcstd
+        self.progress_bar.setValue(35)
+
+        worker = DesarchiverWorker(archive_7z, fichier_sortie_fcstd, self.progress_bar, self.btn_ouvrir_fichier)
+        worker.signals.log.connect(self.log_append)
+        worker.signals.progress.connect(self.progress_bar.setValue)
+        # worker.signals.success.connect(lambda ok: self.ouvrir_fcstd_apres(ok, fichier_sortie_fcstd))
+        worker.signals.finished.connect(lambda: self.set_buttons_enabled(True))
+        worker.signals.finished.connect(lambda: self.progress_bar.setValue(100))
+        worker.signals.success.connect(lambda ok: self.btn_ouvrir_fichier.setEnabled(True))
+        worker.signals.success.connect(lambda: self.btn_ouvrir_fichier.setText(f"📂 Ouvrir {os.path.basename(fichier_sortie_fcstd)} dans FreeCAD"))
+
+        self.threadpool.start(worker)
+
+    def ouvrir_fcstd_apres(self, ok, fichier):
+        if ok:
+            try:
+                self.log_append("✅ Ouverture du fichier...")
+                FreeCAD.openDocument(fichier)
+            except Exception as e:
+                self.log_append(f"❌ Erreur lors de l'ouverture : {e}")
+                
+    def ouvrir_fcstd(self):
+        fichier = self.fichier_sortie_fcstd
+        try:
+            self.log_append("✅ Ouverture du fichier...")
+            FreeCAD.openDocument(fichier)
+        except Exception as e:
+            self.log_append(f"❌ Erreur lors de l'ouverture : {e}")
+
+# Affichage dans FreeCAD
+try:
+    myWin.close()
+except:
+    pass
+myWin = FCStdCompressor()
+myWin.show()
